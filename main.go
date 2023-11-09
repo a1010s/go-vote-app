@@ -1,36 +1,64 @@
 package main
 
 import (
-	"database/sql"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 
+	"github.com/dgraph-io/badger/v3"
 	"github.com/gin-gonic/gin"
-	_ "github.com/mattn/go-sqlite3"
 )
 
-var db *sql.DB
+var (
+	option1  string
+	option2  string
+	question string
+	db       *badger.DB
+)
 
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite3", "votes.db")
+	opts := badger.DefaultOptions("badger-db")
+	db, err = badger.Open(opts)
 	if err != nil {
 		log.Fatal("Error opening database:", err)
 	}
-	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS votes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            option TEXT NOT NULL,
-            count INTEGER NOT NULL
-        );
-    `)
+
+	// Initialize keys with initial values if they do not exist
+	err = db.Update(func(txn *badger.Txn) error {
+		_, err := txn.Get([]byte(option1))
+		if err != nil && err == badger.ErrKeyNotFound {
+			// Key not found, set initial value
+			err = txn.Set([]byte(option1), []byte{0})
+			if err != nil {
+				return err
+			}
+		}
+
+		_, err = txn.Get([]byte(option2))
+		if err != nil && err == badger.ErrKeyNotFound {
+			// Key not found, set initial value
+			err = txn.Set([]byte(option2), []byte{0})
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
 	if err != nil {
-		log.Fatal("Error creating table:", err)
+		log.Fatal("Error initializing keys:", err)
 	}
 }
 
 func main() {
+	flag.StringVar(&option1, "option1", "Option 1", "Text for Option 1")
+	flag.StringVar(&option2, "option2", "Option 2", "Text for Option 2")
+	flag.StringVar(&question, "question", "Vote for Your Favorite", "Question for the voting poll")
+	flag.Parse()
+
 	initDB()
 	r := gin.Default()
 
@@ -38,16 +66,31 @@ func main() {
 
 	r.GET("/", func(c *gin.Context) {
 		var option1Count, option2Count int
-		err := db.QueryRow("SELECT count FROM votes WHERE option = 'Option 1'").Scan(&option1Count)
+		err := db.View(func(txn *badger.Txn) error {
+			item, err := txn.Get([]byte(option1))
+			if err == nil {
+				err = item.Value(func(val []byte) error {
+					option1Count = int(val[0])
+					return nil
+				})
+			}
+			item, err = txn.Get([]byte(option2))
+			if err == nil {
+				err = item.Value(func(val []byte) error {
+					option2Count = int(val[0])
+					return nil
+				})
+			}
+			return err
+		})
 		if err != nil {
-			option1Count = 0
-		}
-		err = db.QueryRow("SELECT count FROM votes WHERE option = 'Option 2'").Scan(&option2Count)
-		if err != nil {
-			option2Count = 0
+			option1Count, option2Count = 0, 0
 		}
 
 		c.HTML(http.StatusOK, "index.html", gin.H{
+			"Question":     question,
+			"Option1":      option1,
+			"Option2":      option2,
 			"Option1Votes": option1Count,
 			"Option2Votes": option2Count,
 		})
@@ -56,15 +99,70 @@ func main() {
 	r.POST("/vote", func(c *gin.Context) {
 		option := c.PostForm("vote")
 
-		_, err := db.Exec("UPDATE votes SET count = count + 1 WHERE option = ?", option)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		var key []byte
+		if option == option1 {
+			key = []byte(option1)
+		} else if option == option2 {
+			key = []byte(option2)
+		} else {
+			log.Println("Invalid option:", option)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid option"})
 			return
 		}
 
-		c.Redirect(http.StatusSeeOther, "/")
+		err := db.Update(func(txn *badger.Txn) error {
+			item, err := txn.Get(key)
+			if err == nil {
+				var count int
+				err = item.Value(func(val []byte) error {
+					count = int(val[0])
+					return nil
+				})
+				if err == nil {
+					err = txn.Set(key, []byte{byte(count + 1)})
+				}
+			}
+			return err
+		})
+
+		if err != nil {
+			log.Println("Error updating votes:", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal Server Error"})
+			return
+		}
+
+		// Retrieve the updated vote counts
+		option1Count := dbGetVotes(option1)
+		option2Count := dbGetVotes(option2)
+
+		// Render the index.html template with the updated vote counts
+		c.HTML(http.StatusOK, "index.html", gin.H{
+			"Question":     question,
+			"Option1":      option1,
+			"Option2":      option2,
+			"Option1Votes": option1Count,
+			"Option2Votes": option2Count,
+		})
 	})
 
 	fmt.Println("Server is running on :8099")
 	r.Run(":8099")
+}
+
+func dbGetVotes(option string) int {
+	var count int
+	err := db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(option))
+		if err == nil {
+			err = item.Value(func(val []byte) error {
+				count = int(val[0])
+				return nil
+			})
+		}
+		return err
+	})
+	if err != nil {
+		count = 0
+	}
+	return count
 }
