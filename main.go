@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/dgraph-io/badger/v3"
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,8 @@ var (
 	option2  string
 	question string
 	db       *badger.DB
+	votedIPs = make(map[string]bool)
+	mu       sync.Mutex
 )
 
 func initDB() {
@@ -97,19 +100,27 @@ func main() {
 	})
 
 	r.POST("/vote", func(c *gin.Context) {
+		clientIP := c.ClientIP() // Get client's IP address
+		mu.Lock()
+		defer mu.Unlock()
+
+		if votedIPs[clientIP] {
+			// User has already voted
+			c.JSON(http.StatusForbidden, gin.H{"error": "You have already voted."})
+			return
+		}
+
 		option := c.PostForm("vote")
 
-		var key []byte
-		if option == option1 {
-			key = []byte(option1)
-		} else if option == option2 {
-			key = []byte(option2)
-		} else {
+		// Validate the selected option
+		if option != option1 && option != option2 {
 			log.Println("Invalid option:", option)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid option"})
 			return
 		}
 
+		// Update the votes
+		key := []byte(option)
 		err := db.Update(func(txn *badger.Txn) error {
 			item, err := txn.Get(key)
 			if err == nil {
@@ -130,6 +141,9 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal Server Error"})
 			return
 		}
+
+		// Mark the user's IP as voted
+		votedIPs[clientIP] = true
 
 		// Retrieve the updated vote counts
 		option1Count := dbGetVotes(option1)
