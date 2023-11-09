@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Vote for Your Favorite</title>
+</head>
+<body>
+    <h1>Vote for Your Favorite</h1>
+    <form action="/vote" method="post">
+        <label><input type="radio" name="vote" value="Option 1"> Option 1</label><br>
+        <label><input type="radio" name="vote" value="Option 2"> Option 2</label><br>
+        <input type="submit" value="Vote">
+    </form>
+    <h2>Current Votes:</h2>
+    <p>Option 1: {{.Option1Votes}}</p>
+    <p>Option 2: {{.Option2Votes}}</p>
+</body>
+</html>
